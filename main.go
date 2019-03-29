@@ -36,19 +36,25 @@ func main() {
 
 	var pcluster = flag.String("cluster", "127.0.0.1", "comma separated values of the cassandra cluster")
 	var pblockSize = flag.Int("block-size", 4*1024*1024, "block size in bytes")
+	var pconsistency = flag.String("consistency", "ANY", "write consistency: ANY, ONE, TWO, THREE, QUORUM, ALL, LOCAL_QUORUM, EACH_QUORUM, LOCAL_ONE")
 	var pkeyspace = flag.String("keyspace", "baxx", "cassandra keyspace")
 	flag.Parse()
+	consistency := gocql.Any
+	err := consistency.UnmarshalText([]byte(*pconsistency))
+	if err != nil {
+		log.Panic(err)
+	}
 
 	cluster := gocql.NewCluster(strings.Split(*pcluster, ",")...)
 	cluster.Keyspace = *pkeyspace
-	cluster.Consistency = gocql.Any
+	cluster.Consistency = consistency
 	cluster.Timeout = 1 * time.Minute
 	session, err := cluster.CreateSession()
 	if err != nil {
 		log.Panic(err)
 	}
 	defer session.Close()
-
+	log.Printf("bind to: %s, cassandra: %s/%s consistency: %s, block size: %d", *pbind, *pcluster, *pkeyspace, consistency, *pblockSize)
 	http.HandleFunc("/set/", func(w http.ResponseWriter, r *http.Request) {
 		key := strings.TrimPrefix(r.RequestURI, "/set/")
 

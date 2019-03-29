@@ -79,7 +79,11 @@ func main() {
 		w.Header().Set("Transfer-Encoding", "chunked")
 		reader, err := ReadObject(key, session)
 		if err != nil {
-			http.Error(w, err.Error(), 500)
+			if err.Error() == "NOTFOUND" {
+				http.Error(w, err.Error(), 404)
+			} else {
+				http.Error(w, err.Error(), 500)
+			}
 		} else {
 			_, err := io.Copy(w, reader)
 			if err != nil {

@@ -26,6 +26,8 @@ CREATE TABLE baxx.blocks_id_cache (key ascii, ids list<int>, created_at timestam
 # SELECT part FROM blocks WHERE key=abc
 # so we can just have id cache
 # this also means we never do walkable query, and dont care about cassandra's tombstones
+# the reason we dont just keep the max block id, is because i think in the future we will
+# parallelize the writing, and then blocks will not be continuous
 
 */
 

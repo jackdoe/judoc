@@ -179,7 +179,7 @@ func ReadObject(key string, session *gocql.Session) (*ChunkReader, error) {
 	block := int64(-1)
 	for {
 		ctx, _ := context.WithTimeout(context.Background(), 1*time.Minute)
-		iter := session.Query(`SELECT id FROM blocks WHERE key = ? AND id > ? LIMIT 20`, key, block).WithContext(ctx).Consistency(gocql.One).Iter()
+		iter := session.Query(`SELECT id FROM blocks WHERE key = ? AND id > ? LIMIT 100`, key, block).WithContext(ctx).Consistency(gocql.One).Iter()
 		atLeastOne := false
 		for iter.Scan(&block) {
 			blocks = append(blocks, block)

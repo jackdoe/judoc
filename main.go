@@ -1,12 +1,10 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strings"
 	"time"
 
@@ -21,7 +19,13 @@ $ sudo docker run -p 9042:9042 scylladb/scylla
 $ sudo docker exec -t -i $( sudo docker ps | grep scylla | awk '{ print $1 }') cqlsh
 
 CREATE KEYSPACE "baxx"  WITH REPLICATION = { 'class' : 'SimpleStrategy', 'replication_factor' : 1};
-CREATE TABLE baxx.blocks (key ascii, id bigint, part blob, PRIMARY KEY ((key), id));
+CREATE TABLE baxx.blocks (key ascii, id int, part blob, created_at timestamp, PRIMARY KEY ((key), id));
+CREATE TABLE baxx.blocks_id_cache (key ascii, ids list<int>, created_at timestamp, PRIMARY KEY (key));
+
+# with 4mb block size, 10gb file has 2k rows, this is super slow to query from cassandra,
+# SELECT part FROM blocks WHERE key=abc
+# so we can just have id cache
+# this also means we never do walkable query, and dont care about cassandra's tombstones
 
 */
 
@@ -91,17 +95,24 @@ func main() {
 
 func DeleteObject(key string, session *gocql.Session) error {
 	log.Infof("removing %s", key)
+	if err := session.Query(`DELETE FROM blocks_id_cache WHERE key = ?`, key).Exec(); err != nil {
+		log.Warnf("error removing id cache, key: %s, error: %s", key, err.Error())
+	}
+
 	if err := session.Query(`DELETE FROM blocks WHERE key = ?`, key).Exec(); err != nil {
 		log.Warnf("error removing, key: %s, error: %s", key, err.Error())
 		return err
 	}
+
 	return nil
 }
 
 func WriteObject(blockSize int, key string, body io.Reader, session *gocql.Session) error {
 	log.Infof("setting %s", key)
 	buf := make([]byte, blockSize)
-	id := int64(0)
+	id := int(0)
+	ids := []int{}
+
 	for {
 		end := false
 		n, err := io.ReadFull(body, buf)
@@ -120,24 +131,33 @@ func WriteObject(blockSize int, key string, body io.Reader, session *gocql.Sessi
 			id++
 			part := buf[:n]
 			t0 := time.Now()
-			if err := session.Query(`INSERT INTO blocks (key, id, part) VALUES (?, ?, ?)`, key, id, part).Exec(); err != nil {
+			if err := session.Query(`INSERT INTO blocks (key, id, part, created_at) VALUES (?, ?, ?, ?)`, key, id, part, time.Now()).Exec(); err != nil {
 				log.Warnf("error inserting, key: %s, block id: %d, error: %s", key, id, err.Error())
 				if err := DeleteObject(key, session); err != nil {
 					return err
 				}
 				return err
 			}
+			ids = append(ids, id)
 			log.Infof("  key: %s creating block id: %d, size %d, took %d", key, id, len(part), time.Now().Sub(t0).Nanoseconds()/1e6)
 		}
 		if end {
 			break
 		}
 	}
+
+	if err := session.Query(`INSERT INTO blocks_id_cache (key, ids, created_at) VALUES (?, ?,?)`, key, ids, time.Now()).Exec(); err != nil {
+		log.Warnf("error inserting id cache, key: %s, error: %s", key, err.Error())
+		if err := DeleteObject(key, session); err != nil {
+			return err
+		}
+		return err
+	}
 	return nil
 }
 
 type ChunkReader struct {
-	blocks     []int64
+	blocks     []int
 	blockIndex int
 	part       []byte
 	cursor     int
@@ -150,11 +170,11 @@ func (c *ChunkReader) ReadBlock() error {
 		return io.EOF
 	}
 	t0 := time.Now()
-
-	if err := c.session.Query(`SELECT part FROM blocks WHERE key = ? AND id = ?`, c.key, c.blocks[c.blockIndex]).Consistency(gocql.One).Scan(&c.part); err != nil {
+	id := c.blocks[c.blockIndex]
+	if err := c.session.Query(`SELECT part FROM blocks WHERE key = ? AND id = ?`, c.key, id).Consistency(gocql.One).Scan(&c.part); err != nil {
 		return err
 	}
-	log.Printf("  key: %s reading block %d, size: %d, took: %d", c.key, c.blocks[c.blockIndex], len(c.part), time.Now().Sub(t0).Nanoseconds()/1e6)
+	log.Printf("  key: %s reading block %d, size: %d, took: %d", c.key, id, len(c.part), time.Now().Sub(t0).Nanoseconds()/1e6)
 	c.blockIndex++
 	return nil
 }
@@ -175,29 +195,14 @@ func (c *ChunkReader) Read(p []byte) (int, error) {
 func ReadObject(key string, session *gocql.Session) (*ChunkReader, error) {
 	log.Infof("getting %s", key)
 
-	blocks := []int64{}
-	block := int64(-1)
-	for {
-		ctx, _ := context.WithTimeout(context.Background(), 1*time.Minute)
-		iter := session.Query(`SELECT id FROM blocks WHERE key = ? AND id > ? LIMIT 100`, key, block).WithContext(ctx).Consistency(gocql.One).Iter()
-		atLeastOne := false
-		for iter.Scan(&block) {
-			blocks = append(blocks, block)
-			atLeastOne = true
-		}
-		if err := iter.Close(); err != nil {
-			return nil, err
-		}
-		if !atLeastOne {
-			break
-		}
+	var blocks []int
+	if err := session.Query(`SELECT ids FROM blocks_id_cache WHERE key = ?`, key).Consistency(gocql.One).Scan(&blocks); err != nil {
+		return nil, err
 	}
+
 	if len(blocks) == 0 {
 		return nil, fmt.Errorf("NOTFOUND")
 	}
 
-	sort.Slice(blocks, func(i, j int) bool {
-		return blocks[i] < blocks[j]
-	})
 	return &ChunkReader{blocks: blocks, key: key, session: session}, nil
 }

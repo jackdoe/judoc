@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/gocql/gocql"
-	_ "github.com/jinzhu/gorm/dialects/postgres"
 	log "github.com/sirupsen/logrus"
 )
 

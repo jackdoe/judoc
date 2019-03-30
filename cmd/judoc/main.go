@@ -131,12 +131,13 @@ func DeleteObject(ns string, key string, session *gocql.Session) error {
 	log.Infof("removing %s:%s", ns, key)
 
 	blocks, err := GetBlocks(ns, key, session)
-	if len(blocks) == 0 {
-		return errNotFound
-	}
 	if err != nil {
 		log.Warnf("error removing file(cant get blocks), key: %s:%s, error: %s", ns, key, err.Error())
 		return err
+	}
+
+	if len(blocks) == 0 {
+		return errNotFound
 	}
 
 	if err := session.Query(`DELETE FROM files WHERE key = ? AND namespace = ?`, key, ns).Exec(); err != nil {

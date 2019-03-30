@@ -18,15 +18,9 @@ $ sudo docker run -p 9042:9042 scylladb/scylla
 $ sudo docker exec -t -i $( sudo docker ps | grep scylla | awk '{ print $1 }') cqlsh
 
 CREATE KEYSPACE "baxx"  WITH REPLICATION = { 'class' : 'SimpleStrategy', 'replication_factor' : 1};
-CREATE TABLE baxx.blocks (key ascii, id int, part blob, created_at timestamp, PRIMARY KEY ((key), id));
-CREATE TABLE baxx.blocks_id_cache (key ascii, ids list<int>, created_at timestamp, PRIMARY KEY (key));
-
-# with 4mb block size, 10gb file has 2k rows, this is super slow to query from cassandra,
-# SELECT part FROM blocks WHERE key=abc
-# so we can just have id cache
-# this also means we never do walkable query, and dont care about cassandra's tombstones
-# the reason we dont just keep the max block id, is because i think in the future we will
-# parallelize the writing, and then blocks will not be continuous
+CREATE TABLE baxx.blocks (id timeuuid, part blob, PRIMARY KEY(id));
+CREATE TABLE baxx.files (key ascii, namespace ascii, blocks list<uuid>, modified_at timestamp, PRIMARY KEY (key, namespace));
+CREATE INDEX ON baxx.files (namespace)
 
 */
 
@@ -41,6 +35,7 @@ func main() {
 	var pkeypath = flag.String("keypath", "", "ssl key path")
 	var pcertpath = flag.String("certpath", "", "ssl cert path")
 	flag.Parse()
+
 	consistency := gocql.Any
 	err := consistency.UnmarshalText([]byte(*pconsistency))
 	if err != nil {
@@ -65,125 +60,177 @@ func main() {
 	}
 	defer session.Close()
 	log.Printf("bind to: %s, cassandra: %s/%s consistency: %s, block size: %d", *pbind, *pcluster, *pkeyspace, consistency, *pblockSize)
-	http.HandleFunc("/set/", func(w http.ResponseWriter, r *http.Request) {
-		key := strings.TrimPrefix(r.RequestURI, "/set/")
 
-		body := r.Body
-		defer body.Close()
+	http.HandleFunc("/io/", func(w http.ResponseWriter, r *http.Request) {
+		p := strings.Trim(r.RequestURI, "/")
+		split := strings.SplitN(p, "/", 3)
+		if len(split) != 3 {
+			http.Error(w, "must use /io/namespace-uuid/path/key", 500)
+		}
+		ns := split[1]
+		key := split[2]
 
-		if err := DeleteObject(key, session); err != nil {
-			http.Error(w, err.Error(), 500)
-		} else {
-			err := WriteObject(*pblockSize, key, body, session)
+		if r.Method == "PUT" || r.Method == "POST" {
+			body := r.Body
+			defer body.Close()
+
+			err := WriteObject(*pblockSize, ns, key, body, session)
 			if err != nil {
 				http.Error(w, err.Error(), 500)
 			} else {
 				fmt.Fprintf(w, "OK")
 			}
-		}
-	})
+		} else if r.Method == "GET" {
+			w.Header().Set("Transfer-Encoding", "chunked")
+			reader, err := ReadObject(ns, key, session)
 
-	http.HandleFunc("/get/", func(w http.ResponseWriter, r *http.Request) {
-		key := strings.TrimPrefix(r.RequestURI, "/get/")
-
-		w.Header().Set("Transfer-Encoding", "chunked")
-		reader, err := ReadObject(key, session)
-		if err != nil {
-			if err.Error() == "NOTFOUND" {
-				http.Error(w, err.Error(), 404)
-			} else {
-				http.Error(w, err.Error(), 500)
-			}
-		} else {
-			_, err := io.Copy(w, reader)
 			if err != nil {
-				http.Error(w, err.Error(), 500)
+				if err.Error() == "NOTFOUND" {
+					http.Error(w, err.Error(), 404)
+				} else {
+					http.Error(w, err.Error(), 500)
+				}
+			} else {
+				_, err := io.Copy(w, reader)
+				if err != nil {
+					log.Warnf("error sending the %s:%s error: %s", ns, key, err.Error())
+					http.Error(w, err.Error(), 500)
+				}
 			}
-		}
-	})
 
-	http.HandleFunc("/delete/", func(w http.ResponseWriter, r *http.Request) {
-		key := strings.TrimPrefix(r.RequestURI, "/delete/")
-
-		if err := DeleteObject(key, session); err != nil {
-			http.Error(w, err.Error(), 500)
+		} else if r.Method == "DELETE" {
+			if err := DeleteObject(ns, key, session); err != nil {
+				http.Error(w, err.Error(), 500)
+			} else {
+				fmt.Fprintf(w, "OK")
+			}
 		} else {
-			fmt.Fprintf(w, "OK")
+			http.Error(w, "unknown method", 500)
 		}
 	})
 
 	log.Fatal(http.ListenAndServe(*pbind, nil))
 }
 
-func DeleteObject(key string, session *gocql.Session) error {
-	log.Infof("removing %s", key)
-	if err := session.Query(`DELETE FROM blocks_id_cache WHERE key = ?`, key).Exec(); err != nil {
-		log.Warnf("error removing id cache, key: %s, error: %s", key, err.Error())
+func DeleteTransaction(tx []gocql.UUID, session *gocql.Session) error {
+	if len(tx) > 0 {
+		log.Infof("removing transaction %s", tx)
+		if err := session.Query(`DELETE FROM blocks WHERE id IN ?`, tx).Exec(); err != nil {
+			log.Warnf("error removing transaction: %s, error: %s", tx, err.Error())
+			return err
+		}
+	}
+	return nil
+}
+
+func DeleteObject(ns string, key string, session *gocql.Session) error {
+	log.Infof("removing %s:%s", ns, key)
+
+	blocks, err := GetBlocks(ns, key, session)
+	if err != nil {
+		log.Warnf("error removing file(cant get blocks), key: %s:%s, error: %s", ns, key, err.Error())
+		return err
 	}
 
-	if err := session.Query(`DELETE FROM blocks WHERE key = ?`, key).Exec(); err != nil {
-		log.Warnf("error removing, key: %s, error: %s", key, err.Error())
+	if err := session.Query(`DELETE FROM files WHERE key = ? AND namespace = ?`, key, ns).Exec(); err != nil {
+		log.Warnf("error removing file, key: %s:%s, error: %s", ns, key, err.Error())
+		return err
+	}
+
+	if err := session.Query(`DELETE FROM blocks WHERE id IN ?`, blocks).Exec(); err != nil {
+		log.Warnf("error removing blocks, key: %s:%s, error: %s", ns, key, err.Error())
 		return err
 	}
 
 	return nil
 }
 
-func WriteObject(blockSize int, key string, body io.Reader, session *gocql.Session) error {
-	log.Infof("setting %s", key)
+func WriteObject(blockSize int, ns string, key string, body io.Reader, session *gocql.Session) error {
+	log.Infof("setting %s:%s", ns, key)
 	buf := make([]byte, blockSize)
-	id := int(0)
-	ids := []int{}
-
+	ids := []gocql.UUID{}
 	for {
 		end := false
-		n, err := io.ReadFull(body, buf)
-		if err != nil {
-			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				end = true
-			} else {
-				log.Warnf("error reading, key: %s, error: %s", key, err.Error())
-				if err := DeleteObject(key, session); err != nil {
+		cursor := 0
+		for {
+			n, err := body.Read(buf[cursor:])
+			cursor += n
+			if err != nil {
+				if err == io.EOF {
+					end = true
+					break
+				} else {
+					log.Warnf("error reading, key: %s:%s, error: %s", ns, key, err.Error())
+					if err := DeleteTransaction(ids, session); err != nil {
+						return err
+					}
 					return err
 				}
-				return err
+			}
+			if cursor >= blockSize {
+				break
 			}
 		}
-		if n > 0 {
-			id++
-			part := buf[:n]
+
+		if cursor > 0 {
+			id := gocql.TimeUUID()
+			part := buf[:cursor]
+
 			t0 := time.Now()
-			if err := session.Query(`INSERT INTO blocks (key, id, part, created_at) VALUES (?, ?, ?, ?)`, key, id, part, time.Now()).Exec(); err != nil {
-				log.Warnf("error inserting, key: %s, block id: %d, error: %s", key, id, err.Error())
-				if err := DeleteObject(key, session); err != nil {
+			if err := session.Query(`INSERT INTO blocks (id,  part) VALUES (?, ?)`, id, part).Exec(); err != nil {
+				log.Warnf("error inserting, key: %s:%s, block id: %s, error: %s", ns, key, id, err.Error())
+				if err := DeleteTransaction(ids, session); err != nil {
 					return err
 				}
 				return err
 			}
 			ids = append(ids, id)
-			log.Infof("  key: %s creating block id: %d, size %d, took %d", key, id, len(part), time.Now().Sub(t0).Nanoseconds()/1e6)
+			log.Infof("  key: %s:%s creating block id: %s, size %d, took %d", ns, key, id, len(part), time.Now().Sub(t0).Nanoseconds()/1e6)
 		}
 		if end {
 			break
 		}
 	}
 
-	if err := session.Query(`INSERT INTO blocks_id_cache (key, ids, created_at) VALUES (?, ?,?)`, key, ids, time.Now()).Exec(); err != nil {
-		log.Warnf("error inserting id cache, key: %s, error: %s", key, err.Error())
-		if err := DeleteObject(key, session); err != nil {
+	// RACE, if 2 people are writing to the same object at the same time, only one will take precedence
+
+	previousBlocks, err := GetBlocks(ns, key, session)
+	if err != nil {
+		log.Warnf("error removing file(cant get blocks), key: %s:%s, error: %s", ns, key, err.Error())
+		if err := DeleteTransaction(ids, session); err != nil {
 			return err
 		}
+
 		return err
 	}
+
+	if err := session.Query(`INSERT INTO files (namespace, key, blocks, modified_at) VALUES (?, ?, ?,?)`, ns, key, ids, time.Now()).Exec(); err != nil {
+		log.Warnf("error inserting id cache, key: %s, error: %s", key, err.Error())
+		if err := DeleteTransaction(ids, session); err != nil {
+			return err
+		}
+
+		return err
+	}
+
+	log.Printf("removing previous blocks %s", previousBlocks)
+	if len(previousBlocks) > 0 {
+		if err := session.Query(`DELETE FROM blocks WHERE id IN ?`, previousBlocks).Exec(); err != nil {
+			log.Warnf("error removing blocks after upload, orphans %#v, key: %s:%s, error: %s", previousBlocks, ns, key, err.Error())
+			return err
+		}
+	}
+
 	return nil
 }
 
 type ChunkReader struct {
-	blocks     []int
+	blocks     []gocql.UUID
 	blockIndex int
 	part       []byte
 	cursor     int
 	key        string
+	ns         string
 	session    *gocql.Session
 }
 
@@ -193,10 +240,10 @@ func (c *ChunkReader) ReadBlock() error {
 	}
 	t0 := time.Now()
 	id := c.blocks[c.blockIndex]
-	if err := c.session.Query(`SELECT part FROM blocks WHERE key = ? AND id = ?`, c.key, id).Consistency(gocql.One).Scan(&c.part); err != nil {
+	if err := c.session.Query(`SELECT part FROM blocks WHERE id = ?`, id).Consistency(gocql.One).Scan(&c.part); err != nil {
 		return err
 	}
-	log.Printf("  key: %s reading block %d, size: %d, took: %d", c.key, id, len(c.part), time.Now().Sub(t0).Nanoseconds()/1e6)
+	log.Printf("  key: %s:%s @ %s reading block %s, size: %d, took: %d", c.ns, c.key, id, id, len(c.part), time.Now().Sub(t0).Nanoseconds()/1e6)
 	c.blockIndex++
 	return nil
 }
@@ -214,11 +261,21 @@ func (c *ChunkReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-func ReadObject(key string, session *gocql.Session) (*ChunkReader, error) {
-	log.Infof("getting %s", key)
+func GetBlocks(ns, key string, session *gocql.Session) ([]gocql.UUID, error) {
+	var blocks []gocql.UUID
+	if err := session.Query(`SELECT blocks FROM files WHERE key = ? AND namespace=?`, key, ns).Consistency(gocql.One).Scan(&blocks); err != nil {
+		if err != gocql.ErrNotFound {
+			return nil, err
+		}
+	}
 
-	var blocks []int
-	if err := session.Query(`SELECT ids FROM blocks_id_cache WHERE key = ?`, key).Consistency(gocql.One).Scan(&blocks); err != nil {
+	return blocks, nil
+}
+
+func ReadObject(ns string, key string, session *gocql.Session) (*ChunkReader, error) {
+	log.Infof("getting %s:%s", ns, key)
+	blocks, err := GetBlocks(ns, key, session)
+	if err != nil {
 		return nil, err
 	}
 
@@ -226,5 +283,5 @@ func ReadObject(key string, session *gocql.Session) (*ChunkReader, error) {
 		return nil, fmt.Errorf("NOTFOUND")
 	}
 
-	return &ChunkReader{blocks: blocks, key: key, session: session}, nil
+	return &ChunkReader{blocks: blocks, key: key, ns: ns, session: session}, nil
 }

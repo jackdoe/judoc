@@ -29,12 +29,12 @@ func NewClient(url string, h *http.Client) *Client {
 	return &Client{url: url, h: h}
 }
 
-func (c *Client) endpoint(op string, key string) string {
-	return fmt.Sprintf("%s%s/%s", c.url, op, key)
+func (c *Client) endpoint(ns string, key string) string {
+	return fmt.Sprintf("%sio/%s/%s", c.url, ns, key)
 }
 
-func (c *Client) Set(key string, blob io.Reader) error {
-	resp, err := c.h.Post(c.endpoint("set", key), "octet/stream", blob)
+func (c *Client) Set(ns string, key string, blob io.Reader) error {
+	resp, err := c.h.Post(c.endpoint(ns, key), "octet/stream", blob)
 	if err != nil {
 		return err
 	}
@@ -54,8 +54,13 @@ func (c *Client) Set(key string, blob io.Reader) error {
 	return nil
 }
 
-func (c *Client) Delete(key string) error {
-	resp, err := c.h.Get(c.endpoint("delete", key))
+func (c *Client) Delete(ns string, key string) error {
+	req, err := http.NewRequest("DELETE", c.endpoint(ns, key), nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.h.Do(req)
 	if err != nil {
 		return err
 	}
@@ -75,8 +80,8 @@ func (c *Client) Delete(key string) error {
 	return nil
 }
 
-func (c *Client) Get(key string) (io.ReadCloser, error) {
-	resp, err := c.h.Get(c.endpoint("get", key))
+func (c *Client) Get(ns string, key string) (io.ReadCloser, error) {
+	resp, err := c.h.Get(c.endpoint(ns, key))
 	if err != nil {
 		return nil, err
 	}

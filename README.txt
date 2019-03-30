@@ -8,19 +8,20 @@ chunks the blobs in 4mb chunks
 $ sudo docker run -p 9042:9042 scylladb/scylla
 $ sudo docker exec -t -i $( sudo docker ps | grep scylla | awk '{ print $1 }') cqlsh
 
-CREATE KEYSPACE "baxx"  WITH REPLICATION = { 'class' : 'SimpleStrategy', 'replication_factor' : 1};
-CREATE TABLE baxx.blocks (key ascii, id int, part blob, created_at timestamp, PRIMARY KEY ((key), id));
-CREATE TABLE baxx.blocks_id_cache (key ascii, ids list<int>, created_at timestamp, PRIMARY KEY (key));
+CREATE TABLE baxx.blocks (id timeuuid, part blob, PRIMARY KEY(id));
+CREATE TABLE baxx.files (key ascii, namespace ascii, blocks list<uuid>, modified_at timestamp, PRIMARY KEY (key, namespace));
+CREATE INDEX ON baxx.files (namespace)
 
 $ go run main.go
 
 # query
 
-$ curl -T file http://localhost:9122/set/example
+$ curl -T file http://localhost:9122/io/namespace/example
 OK
-$ curl http://localhost:9122/get/example > example.dl
-$ curl http://localhost:9122/delete/example
+$ curl http://localhost:9122/io/namespace/example > example.dl
+$ curl -XDELETE http://localhost:9122/io/namespace/example
 OK
-$ curl http://localhost:9122/get/example
+$ curl http://localhost:9122/io/namespace/example
 NOTFOUND
+
 

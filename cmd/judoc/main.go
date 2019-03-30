@@ -51,12 +51,12 @@ func main() {
 	cluster.Keyspace = *pkeyspace
 	cluster.Consistency = consistency
 	cluster.Timeout = 1 * time.Minute
+
 	if *pcapath != "" || *pcertpath != "" || *pkeypath != "" {
 		cluster.SslOpts = &gocql.SslOptions{
-			EnableHostVerification: true,
-			CaPath:                 *pcapath,
-			KeyPath:                *pkeypath,
-			CertPath:               *pcertpath,
+			CaPath:   *pcapath,
+			KeyPath:  *pkeypath,
+			CertPath: *pcertpath,
 		}
 	}
 	session, err := cluster.CreateSession()

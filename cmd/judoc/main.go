@@ -19,10 +19,10 @@ $ sudo docker exec -t -i $( sudo docker ps | grep scylla | awk '{ print $1 }') c
 
 CREATE KEYSPACE "baxx"  WITH REPLICATION = { 'class' : 'SimpleStrategy', 'replication_factor' : 1};
 CREATE TABLE baxx.blocks (id timeuuid, part blob, PRIMARY KEY(id));
-CREATE TABLE baxx.files (key ascii, namespace ascii, blocks list<uuid>, modified_at timestamp, PRIMARY KEY (key, namespace));
-CREATE INDEX ON baxx.files (namespace)
+CREATE TABLE baxx.files (key ascii, namespace ascii, blocks frozen<list<uuid>>, modified_at timestamp, PRIMARY KEY (key, namespace));
 
 */
+var errNotFound = fmt.Errorf("NOTFOUND")
 
 func main() {
 	var pbind = flag.String("bind", ":9122", "bind")
@@ -85,7 +85,7 @@ func main() {
 			reader, err := ReadObject(ns, key, session)
 
 			if err != nil {
-				if err.Error() == "NOTFOUND" {
+				if err == errNotFound {
 					http.Error(w, err.Error(), 404)
 				} else {
 					http.Error(w, err.Error(), 500)
@@ -280,7 +280,7 @@ func ReadObject(ns string, key string, session *gocql.Session) (*ChunkReader, er
 	}
 
 	if len(blocks) == 0 {
-		return nil, fmt.Errorf("NOTFOUND")
+		return nil, errNotFound
 	}
 
 	return &ChunkReader{blocks: blocks, key: key, ns: ns, session: session}, nil

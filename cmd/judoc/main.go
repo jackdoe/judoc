@@ -37,6 +37,9 @@ func main() {
 	var pblockSize = flag.Int("block-size", 4*1024*1024, "block size in bytes")
 	var pconsistency = flag.String("consistency", "ANY", "write consistency: ANY, ONE, TWO, THREE, QUORUM, ALL, LOCAL_QUORUM, EACH_QUORUM, LOCAL_ONE")
 	var pkeyspace = flag.String("keyspace", "baxx", "cassandra keyspace")
+	var pcapath = flag.String("capath", "", "ssl ca path")
+	var pkeypath = flag.String("keypath", "", "ssl key path")
+	var pcertpath = flag.String("certpath", "", "ssl cert path")
 	flag.Parse()
 	consistency := gocql.Any
 	err := consistency.UnmarshalText([]byte(*pconsistency))
@@ -48,6 +51,14 @@ func main() {
 	cluster.Keyspace = *pkeyspace
 	cluster.Consistency = consistency
 	cluster.Timeout = 1 * time.Minute
+	if *pcapath != "" || *pcertpath != "" || *pkeypath != "" {
+		cluster.SslOpts = &gocql.SslOptions{
+			EnableHostVerification: true,
+			CaPath:                 *pcapath,
+			KeyPath:                *pkeypath,
+			CertPath:               *pcertpath,
+		}
+	}
 	session, err := cluster.CreateSession()
 	if err != nil {
 		log.Panic(err)

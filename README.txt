@@ -9,8 +9,7 @@ $ sudo docker run -p 9042:9042 scylladb/scylla
 $ sudo docker exec -t -i $( sudo docker ps | grep scylla | awk '{ print $1 }') cqlsh
 
 CREATE TABLE baxx.blocks (id timeuuid, part blob, PRIMARY KEY(id));
-CREATE TABLE baxx.files (key ascii, namespace ascii, blocks list<uuid>, modified_at timestamp, PRIMARY KEY (key, namespace));
-CREATE INDEX ON baxx.files (namespace)
+CREATE TABLE baxx.files (key ascii, namespace ascii, blocks frozen<list<uuid>>, modified_at timestamp, PRIMARY KEY (key, namespace));
 
 $ go run main.go
 

@@ -193,7 +193,7 @@ func WriteObject(blockSize int, ns string, key string, body io.Reader, session *
 				return err
 			}
 			ids = append(ids, id)
-			log.Infof("  key: %s:%s creating block id: %s, size %d, took %d", ns, key, id, len(part), time.Now().Sub(t0).Nanoseconds()/1e6)
+			log.Infof("  key: %s:%s creating block id: %s, size %d, took %d", ns, key, id, len(part), time.Since(t0).Nanoseconds()/1e6)
 		}
 		if end {
 			break
@@ -251,7 +251,7 @@ func (c *ChunkReader) ReadBlock() error {
 	if err := c.session.Query(`SELECT part FROM blocks WHERE id = ?`, id).Consistency(gocql.One).Scan(&c.part); err != nil {
 		return err
 	}
-	log.Printf("  key: %s:%s @ %s reading block %s, size: %d, took: %d", c.ns, c.key, id, id, len(c.part), time.Now().Sub(t0).Nanoseconds()/1e6)
+	log.Printf("  key: %s:%s @ %s reading block %s, size: %d, took: %d", c.ns, c.key, id, id, len(c.part), time.Since(t0).Nanoseconds()/1e6)
 	c.blockIndex++
 	return nil
 }

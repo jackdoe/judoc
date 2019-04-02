@@ -36,43 +36,50 @@ func RandStringBytesMaskImprSrcUnsafe(n int) string {
 	return *(*string)(unsafe.Pointer(&b))
 }
 
+func doio(t *testing.T, c *Client, ns string, key string, size int) {
+	data := []byte(RandStringBytesMaskImprSrcUnsafe(size))
+	err := c.Set(ns, key, bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reader, err := c.Get(ns, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body, err := ioutil.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader.Close()
+	if !bytes.Equal(body, data) {
+		t.Fatalf("unexpected %s", string(body))
+	}
+
+	err = c.Delete(ns, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err = c.Get(ns, key)
+	if err == nil {
+		reader.Close()
+		t.Fatal("expected error")
+	}
+}
 func TestExample(t *testing.T) {
 	c := NewClient("http://localhost:9122/", nil)
+	ns := RandStringBytesMaskImprSrcUnsafe(10)
+	key := RandStringBytesMaskImprSrcUnsafe(100)
+	doio(t, c, ns, key, 0)
+	doio(t, c, ns, key, 1)
 	for i := 0; i < 1000; i++ {
 
-		ns := RandStringBytesMaskImprSrcUnsafe(10)
-		key := RandStringBytesMaskImprSrcUnsafe(100)
+		ns = RandStringBytesMaskImprSrcUnsafe(10)
+		key = RandStringBytesMaskImprSrcUnsafe(100)
 		// make sure we overwrite properly
 		for j := 0; j < 4; j++ {
-			data := []byte(RandStringBytesMaskImprSrcUnsafe((i * 100) + rand.Intn(100)))
-			err := c.Set(ns, key, bytes.NewReader(data))
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			reader, err := c.Get(ns, key)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			body, err := ioutil.ReadAll(reader)
-			if err != nil {
-				t.Fatal(err)
-			}
-			reader.Close()
-			if !bytes.Equal(body, data) {
-				t.Fatalf("unexpected %s", string(body))
-			}
-
-			err = c.Delete(ns, key)
-			if err != nil {
-				t.Fatal(err)
-			}
-			reader, err = c.Get(ns, key)
-			if err == nil {
-				reader.Close()
-				t.Fatal("expected error")
-			}
+			doio(t, c, ns, key, ((i * 100) + rand.Intn(100)))
 		}
 	}
 }

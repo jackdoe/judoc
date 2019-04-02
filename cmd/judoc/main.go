@@ -131,13 +131,9 @@ func DeleteObject(ns string, key string, session *gocql.Session) error {
 	log.Infof("removing %s:%s", ns, key)
 
 	blocks, err := GetBlocks(ns, key, session)
-	if err != nil {
+	if err != nil && err != errNotFound {
 		log.Warnf("error removing file(cant get blocks), key: %s:%s, error: %s", ns, key, err.Error())
 		return err
-	}
-
-	if len(blocks) == 0 {
-		return errNotFound
 	}
 
 	if err := session.Query(`DELETE FROM files WHERE key = ? AND namespace = ?`, key, ns).Exec(); err != nil {
@@ -203,7 +199,7 @@ func WriteObject(blockSize int, ns string, key string, body io.Reader, session *
 	// RACE, if 2 people are writing to the same object at the same time, only one will take precedence
 
 	previousBlocks, err := GetBlocks(ns, key, session)
-	if err != nil {
+	if err != nil && err != errNotFound {
 		log.Warnf("error removing file(cant get blocks), key: %s:%s, error: %s", ns, key, err.Error())
 		if err := DeleteTransaction(ids, session); err != nil {
 			return err
@@ -272,7 +268,9 @@ func (c *ChunkReader) Read(p []byte) (int, error) {
 func GetBlocks(ns, key string, session *gocql.Session) ([]gocql.UUID, error) {
 	var blocks []gocql.UUID
 	if err := session.Query(`SELECT blocks FROM files WHERE key = ? AND namespace=?`, key, ns).Consistency(gocql.One).Scan(&blocks); err != nil {
-		if err != gocql.ErrNotFound {
+		if err == gocql.ErrNotFound {
+			return nil, errNotFound
+		} else {
 			return nil, err
 		}
 	}
@@ -285,10 +283,6 @@ func ReadObject(ns string, key string, session *gocql.Session) (*ChunkReader, er
 	blocks, err := GetBlocks(ns, key, session)
 	if err != nil {
 		return nil, err
-	}
-
-	if len(blocks) == 0 {
-		return nil, errNotFound
 	}
 
 	return &ChunkReader{blocks: blocks, key: key, ns: ns, session: session}, nil

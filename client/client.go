@@ -62,9 +62,6 @@ func (c *Client) Delete(ns string, key string) error {
 		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return err
-	}
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {

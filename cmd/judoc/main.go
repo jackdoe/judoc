@@ -66,6 +66,7 @@ func main() {
 		split := strings.SplitN(p, "/", 3)
 		if len(split) != 3 {
 			http.Error(w, "must use /io/namespace-uuid/path/key", 500)
+			return
 		}
 		ns := split[1]
 		key := split[2]
